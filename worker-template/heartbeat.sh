@@ -1,19 +1,18 @@
 #!/bin/bash
 
-# Plus tard, on remplaceras ça par l'IP du Control Plane
 URL_CONTROL_PLANE="http://192.168.56.1:4000/api/heartbeat"
-
 WORKER_ID=$(hostname)
-# Récupère l'IP réseau de la machine virtuelle
-WORKER_IP=$(hostname -I | awk '{print $2}') 
 
-echo "Démarrage du service Heartbeat pour $WORKER_ID ($WORKER_IP)..."
+echo "Démarrage du service Heartbeat pour $WORKER_ID..."
 
 while true; do
-    echo "[$(date)] - Le worker $WORKER_ID ($WORKER_IP) est en ligne et prêt."
+    # On cherche spécifiquement l'IP du réseau Vagrant, à chaque boucle
+    WORKER_IP=$(hostname -I | grep -o '192.168.56.[0-9]*')
     
-    # ligne qui servira a prévenir le Control Plane :
-    curl -X POST -H "Content-Type: application/json" -d "{\"worker_id\": \"$WORKER_ID\", \"ip\": \"$WORKER_IP\"}" $URL_CONTROL_PLANE
+    # On n'envoie le ping QUE si l'IP a bien été trouvée
+    if [ ! -z "$WORKER_IP" ]; then
+        curl -s -X POST -H "Content-Type: application/json" -d "{\"worker_id\": \"$WORKER_ID\", \"ip\": \"$WORKER_IP\"}" $URL_CONTROL_PLANE > /dev/null
+    fi
     
     sleep 5
 done

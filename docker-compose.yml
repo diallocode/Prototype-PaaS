@@ -35,5 +35,26 @@ services:
       - api
     command: sh -c "npm install && npm run dev -- --host 0.0.0.0"
 
+  # --- LES NOUVEAUX COMPOSANTS DU CONTROL PLANE ---
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+  control-plane:
+    image: node:20-alpine
+    working_dir: /app
+    volumes:
+      # Assure-toi que ton dossier s'appelle bien "control-plane" à la racine
+      - ./control-plane:/app 
+    ports:
+      - "4000:4000"
+    environment:
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      - redis
+    command: sh -c "npm install && node index.js"
+
 volumes:
   db-data:
