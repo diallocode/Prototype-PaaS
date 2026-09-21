@@ -24,3 +24,30 @@
         src: heartbeat.sh
         dest: /usr/local/bin/heartbeat.sh
         mode: '0755' # Donne les droits d'exécution au script
+
+
+    # Lancement automatique du heartbeat pour signaler que le worker est en marche
+    - name: Configurer le service systemd pour le Heartbeat
+      copy:
+        dest: /etc/systemd/system/heartbeat.service
+        content: |
+          [Unit]
+          Description=Service Heartbeat pour le PaaS
+          After=network.target
+
+          [Service]
+          ExecStart=/usr/local/bin/heartbeat.sh
+          Restart=always
+          RestartSec=3
+          User=root
+
+          [Install]
+          WantedBy=multi-user.target
+        mode: '0644'
+
+    - name: Activer et démarrer le service Heartbeat
+      systemd:
+        name: heartbeat
+        enabled: yes
+        state: started
+        daemon_reload: yes
