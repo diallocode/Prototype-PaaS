@@ -1,0 +1,25 @@
+/flemme.sh
+# Dépendances Node.js (API et Interface)
+node_modules/
+api/node_modules/
+interface-client/node_modules/
+
+# Logs npm
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Fichiers de production / build (générés par Vite)
+dist/
+dist-ssr/
+*.local
+
+# Fichiers d'environnement (pour cacher vos futurs mots de passe)
+.env
+.env.local
+.env.*.local
+
+# Fichiers système et éditeur (VS Code)
+.DS_Store
+Thumbs.db
+.vscode/
