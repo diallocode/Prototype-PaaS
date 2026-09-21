@@ -1,0 +1,26 @@
+- name: Mise en place des workers
+  hosts: all
+  become: yes
+
+  tasks:
+    - name: Mise a jour des workers
+      ansible.builtin.apt:
+        update_cache: yes
+        cache_valid_time: 3600 # chaque 1heure
+    
+    - name: Installation de docker dans les workers
+      ansible.builtin.apt:
+          name: docker.io
+          state: present
+
+    - name: Ajout du user au groupe docker
+      user:
+          name: vagrant
+          groups: docker
+          append: yes
+
+    - name: Copie du script Heartbeat sur le Worker
+      copy:
+        src: heartbeat.sh
+        dest: /usr/local/bin/heartbeat.sh
+        mode: '0755' # Donne les droits d'exécution au script

@@ -40,7 +40,7 @@ Vagrant.configure("2") do |config|
   # the path on the host to the actual folder. The second argument is
   # the path on the guest to mount the folder. And the optional third
   # argument is a set of non-required options.
-  config.vm.synced_folder ".", "/vagrant_data"
+  
 
   # Disable the default share of the current code directory. Doing this
   # provides improved isolation between the vagrant box and your host
@@ -59,6 +59,7 @@ Vagrant.configure("2") do |config|
       w1.vm.box = "generic/debian12"
       w1.vm.hostname = "worker-1"
       w1.vm.network "private_network", ip:"192.168.56.11" 
+      w1.vm.synced_folder "./vagrant_data", "/vagrant_data"
   #
   #  
       # Configuration spécifique à VirtualBox
@@ -67,6 +68,11 @@ Vagrant.configure("2") do |config|
         v.memory = "1024"
         v.cpus = 2
         v.name = "worker-1"
+      end
+
+      # Configuration ansible pour le worker-1
+      config.vm.provision "ansible" do |ansible|
+        ansible.playbook = "playbook.yml"
       end
    end
   #
@@ -77,6 +83,7 @@ Vagrant.configure("2") do |config|
       w2.vm.box = "generic/debian12"
       w2.vm.hostname = "worker-2"
       w2.vm.network "private_network", ip:"192.168.56.10" 
+      w2.vm.synced_folder "./vagrant_data", "/vagrant_data"
   #
   #   # Customize the amount of memory on the VM:
       # Configuration spécifique à VirtualBox
@@ -85,7 +92,11 @@ Vagrant.configure("2") do |config|
         v.memory = "1024"
         v.cpus = 2
         v.name = "worker-2"
-    end
+      end
+
+      config.vm.provision "ansible" do |ansible|
+        ansible.playbook = "playbook.yml"
+      end
    end
   # View the documentation for the provider you are using for more
   # information on available options.
