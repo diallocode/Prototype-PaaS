@@ -18,6 +18,19 @@ async function start() {
 }
 start();
 
+// Récupère l'OS, les vCPU, la RAM (Mo) et le disque (Go) d'un worker via SSH
+async function getWorkerSpecs(ssh) {
+    try {
+        const cmd = '. /etc/os-release && echo "$PRETTY_NAME"; nproc; free -m | awk \'/Mem:/ {print $2}\'; df -BG --output=size / | tail -1 | tr -dc 0-9';
+        const r = await ssh.execCommand(cmd);
+        const [os, cpu, ram, disk] = r.stdout.split('\n').map(l => l.trim());
+        return { os, cpu: parseInt(cpu), ram_mb: parseInt(ram), disk_gb: parseInt(disk) };
+    } catch (e) {
+        console.error('[SPECS] Impossible de lire les specs :', e.message);
+        return null;
+    }
+}
+
 // 1. Route d'enregistrement (Heartbeat) des Workers
 app.post('/api/heartbeat', async (req, res) => {
     const { workerId, ip } = req.body;
@@ -85,6 +98,8 @@ app.post('/api/deploy', async (req, res) => {
             password: 'vagrant'
         });
 
+        const specs = await getWorkerSpecs(ssh);
+
         // Lancement d'un conteneur de test sur un port spécifique
         const portAttribue = 8080;
         await ssh.execCommand(`mkdir -p /vagrant_data/${clientNom}`);
@@ -100,6 +115,7 @@ app.post('/api/deploy', async (req, res) => {
             worker: selectedWorkerId,
             app_url: `http://${selectedWorkerIp}:${portAttribue}`,
             port: portAttribue,
+            specs,
             expires_at: expiresAt
         });
 
