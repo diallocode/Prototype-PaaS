@@ -19,17 +19,21 @@ jobs:
         with:
           node-version: '18'
 
-      # 1. Validation de l'API
-      - name: Installation et Test (API)
-        run: npm install
+      # 1. Installation et Tests de l'API
+      - name: Installation et Tests (API)
+        run: |
+          npm install
+          npm test (décommente quand tu auras ajouté tes scripts de test)
         working-directory: ./api
 
-      # 2. Validation du Control Plane
-      - name: Installation et Test (Control Plane)
-        run: npm install
+      # 2. Installation et Tests du Control Plane
+      - name: Installation et Tests (Control Plane)
+        run: |
+          npm install
+          npm test
         working-directory: ./control-plane
 
-      # 3. Installation et Build du Frontend (interface-client)
+      # 3. Installation et Build du Frontend (Interface Client)
       - name: Installation et Build (Interface Client)
         run: |
           npm install
