@@ -1,0 +1,41 @@
+name: PaaS CI Validation
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  validate-and-build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Récupération du code source
+        uses: actions/checkout@v4
+
+      - name: Configuration de l'environnement Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      # 1. Test et installation de l'API / Control Plane
+      - name: Validation et installation des dépendances (API / Control Plane)
+        run: |
+          # Si tu as un dossier global ou des sous-dossiers, adapte les chemins
+          npm install
+        working-directory: . # Remplace par le chemin de ton API si elle est dans un sous-dossier
+
+      # 2. Test du Build du Frontend Vue.js
+      - name: Installation et Build du Frontend Vue.js
+        run: |
+          npm install
+          npm run build
+        working-directory: . # Remplace par le chemin de ton dossier frontend
+
+      # 3. Validation de la syntaxe de ton Playbook Ansible (Bonus très pro pour ton projet !)
+      - name: Installer Ansible-Lint / Vérification syntaxique
+        run: |
+          sudo apt-get update && sudo apt-get install -y ansible
+          ansible-playbook --syntax-check playbook.yml
+        # (Assure-toi que ton playbook.yml est à la racine ou ajuste son chemin)
