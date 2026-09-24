@@ -22,11 +22,36 @@ const pool = new Pool({
 app.post('/clients', async (req, res) => {
   const { nom, prenom, md, temps } = req.body;
   try {
+    // 1. Sauvegarde du client dans la BDD PostgreSQL
     const result = await pool.query(
       'INSERT INTO Clients (Nom, Prenom, md, temps) VALUES ($1, $2, $3, $4) RETURNING *',
       [nom, prenom, md, temps]
     );
-    res.json(result.rows[0]);
+    const nouveauClient = result.rows[0];
+
+    // 2. Demande de déploiement au Control Plane
+    // On lui envoie la durée et surtout le nom du client !
+    const responseCP = await fetch('http://localhost:4000/api/deploy', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            duree: temps,
+            clientNom: nom
+        })
+    });
+
+    const deployInfo = await responseCP.json();
+
+    if (!responseCP.ok) {
+        throw new Error(deployInfo.error || "Erreur lors du déploiement");
+    }
+
+    // 3. On renvoie les infos du client ET le lien de la VM à l'interface web
+    res.json({
+        client: nouveauClient,
+        deploiement: deployInfo
+    });
+
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -52,12 +77,15 @@ app.post('/login', async (req, res) => {
 
 // Demande de réservation (transmise au Control Plane)
 app.post('/reserver', async (req, res) => {
-  const { duree } = req.body;
+  // 1. On récupère la durée ET le nom du client envoyé par le front-end
+  const { duree, clientNom } = req.body;
+  
   try {
     const response = await fetch('http://control-plane:4000/api/deploy', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ duree })
+      // 2. On transfère les deux variables au Control Plane
+      body: JSON.stringify({ duree, clientNom })
     });
 
     const data = await response.json();

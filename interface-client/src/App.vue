@@ -146,13 +146,18 @@ const reserverMachine = async () => {
     const res = await fetch('http://localhost:3000/reserver', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ duree: parseInt(dureeReservation.value) })
+      // C'EST ICI QUE TOUT CHANGE : On ajoute le nom du client connecté
+      body: JSON.stringify({ 
+        duree: parseInt(dureeReservation.value),
+        clientNom: clientConnecte.value.nom 
+      })
     });
 
     const data = await res.json();
 
     if (res.ok) {
-      machineInfo.value = data.workerInfo;
+      // Assure-toi que la réponse de ton API correspond bien à data.workerInfo
+      machineInfo.value = data.workerInfo || data.deploiement; 
     } else {
       alert("Échec de la réservation : " + (data.error || "Erreur inconnue"));
     }

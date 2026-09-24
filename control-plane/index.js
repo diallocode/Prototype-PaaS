@@ -49,6 +49,8 @@ app.post('/api/deploy', async (req, res) => {
         const keys = await redisClient.keys('worker:*');
         let selectedWorkerId = null;
         let selectedWorkerIp = null;
+        const clientNom = req.body.clientNom || 'client_defaut';
+        console.log(`[DEBUG] Nom du dossier client utilisé : ${clientNom}`);
 
         // Chercher un worker qui a le statut "libre"
         for (const key of keys) {
@@ -85,8 +87,8 @@ app.post('/api/deploy', async (req, res) => {
 
         // Lancement d'un conteneur de test sur un port spécifique
         const portAttribue = 8080;
-        const result = await ssh.execCommand(`docker run -d -p ${portAttribue}:80 nginx`);
-        
+        await ssh.execCommand(`mkdir -p /vagrant_data/${clientNom}`);
+        const result = await ssh.execCommand(`docker run -dit -p ${portAttribue}:7681 -v /vagrant_data/${clientNom}:/data tsl0922/ttyd ttyd -W bash`);
         if (result.code !== 0) {
             await redisClient.set(`worker:${selectedWorkerId}:status`, 'libre');
             await redisClient.del(`worker:${selectedWorkerId}:expires_at`);
