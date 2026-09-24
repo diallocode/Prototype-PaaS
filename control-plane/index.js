@@ -4,91 +4,150 @@ const { NodeSSH } = require('node-ssh');
 
 const app = express();
 app.use(express.json());
-const ssh = new NodeSSH();
 
-// 1. Initialisation de la connexion à Redis (Dynamique pour Docker)
-const redisUrl = process.env.REDIS_URL || 'redis://localhost:6379';
-const redisClient = createClient({ url: redisUrl });
-redisClient.on('error', err => console.log('Erreur Redis', err));
-redisClient.connect().then(() => console.log('Connecté à Redis !'));
+// Connexion au serveur Redis (sur le réseau Docker)
+const redisClient = createClient({
+    url: 'redis://redis:6379'
+});
 
-// 2. La route Heartbeat
+redisClient.on('error', (err) => console.error('Erreur Redis :', err));
+
+async function start() {
+    await redisClient.connect();
+    console.log("Connecté à Redis (Control Plane)");
+}
+start();
+
+// 1. Route d'enregistrement (Heartbeat) des Workers
 app.post('/api/heartbeat', async (req, res) => {
-    const { worker_id, ip } = req.body;
-    
-    // On sauvegarde le Worker dans Redis avec un TTL de 15 secondes
-    await redisClient.set(`worker:${worker_id}`, ip, {
-        EX: 15
-    });
-    
-    console.log(`[RADAR] ${worker_id} (${ip}) enregistré. Expire dans 15s sans nouvelles.`);
-    res.status(200).send({ message: "OK" });
-});
-
-// 3. La route pour lister les Workers disponibles (Le Scheduler)
-app.get('/api/workers', async (req, res) => {
-    try {
-        const keys = await redisClient.keys('worker:*');
-        const workers = [];
-
-        for (const key of keys) {
-            const ip = await redisClient.get(key);
-            const workerId = key.replace('worker:', '');
-            workers.push({ id: workerId, ip: ip });
-        }
-
-        res.status(200).json({ 
-            count: workers.length, 
-            active_workers: workers 
-        });
-        
-    } catch (error) {
-        console.error("Erreur Redis:", error);
-        res.status(500).json({ error: "Erreur lors de la récupération des workers" });
+    const { workerId, ip } = req.body;
+    if (!workerId || !ip) {
+        return res.status(400).json({ error: "workerId et ip requis" });
     }
+
+    const workerKey = `worker:${workerId}`;
+    const statusKey = `worker:${workerId}:status`;
+
+    // Enregistre l'IP du worker
+    await redisClient.set(workerKey, ip);
+
+    // Si le worker n'a pas encore de statut, on l'initialise à "libre"
+    const currentStatus = await redisClient.get(statusKey);
+    if (!currentStatus) {
+        await redisClient.set(statusKey, 'libre');
+    }
+
+    res.status(200).json({ message: "Heartbeat reçu" });
 });
 
-// 4. L'Ordonnanceur (Scheduler) + L'Exécuteur (Déploiement SSH)
+// 2. Route de déploiement / allocation d'un Worker libre
 app.post('/api/deploy', async (req, res) => {
     try {
-        // SCHEDULER : Trouver un worker disponible
+        const dureeMinutes = parseInt(req.body.duree) || 10;
+        
+        // Récupérer toutes les clés des workers enregistrés
         const keys = await redisClient.keys('worker:*');
-        if (keys.length === 0) {
-            return res.status(503).json({ error: "Aucun worker disponible pour le déploiement" });
+        let selectedWorkerId = null;
+        let selectedWorkerIp = null;
+
+        // Chercher un worker qui a le statut "libre"
+        for (const key of keys) {
+            if (key.split(':').length === 2) {
+                const workerId = key.replace('worker:', '');
+                const status = await redisClient.get(`worker:${workerId}:status`);
+
+                if (status === 'libre') {
+                    selectedWorkerId = workerId;
+                    selectedWorkerIp = await redisClient.get(key);
+                    break;
+                }
+            }
         }
 
-       // On prend simplement le premier worker de la liste
-        const firstWorkerKey = keys[0]; // ex: "worker:worker-1"
-        const workerIp = await redisClient.get(firstWorkerKey); // Récupère la vraie IP
-        const workerId = firstWorkerKey.replace('worker:', '');
-        
-        console.log(`[SCHEDULER] Déploiement assigné à ${workerId} (${workerIp})`);
+        if (!selectedWorkerId || !selectedWorkerIp) {
+            return res.status(503).json({ error: "Aucun worker disponible. Tous sont occupés." });
+        }
 
-        // EXÉCUTEUR : Connexion SSH au Worker
+        console.log(`[ALLOCATION] Attribution de ${selectedWorkerId} (${selectedWorkerIp}) pour ${dureeMinutes} minutes.`);
+
+        // Verrouillage immédiat dans Redis
+        const expiresAt = Date.now() + (dureeMinutes * 60 * 1000);
+        await redisClient.set(`worker:${selectedWorkerId}:status`, 'loué');
+        await redisClient.set(`worker:${selectedWorkerId}:expires_at`, expiresAt);
+
+        // Connexion SSH au Worker avec le mot de passe 'vagrant'
+        const ssh = new NodeSSH();
         await ssh.connect({
-            host: workerIp,
+            host: selectedWorkerIp,
             username: 'vagrant',
-            password: 'vagrant' // Mot de passe par défaut des box Vagrant
+            password: 'vagrant'
         });
 
-        // DÉPLOIEMENT : Ordre de lancer un serveur Nginx
-        console.log(`[SSH] Lancement de Nginx sur ${workerId}...`);
-        const result = await ssh.execCommand('docker run -d -p 8080:80 nginx');
+        // Lancement d'un conteneur de test sur un port spécifique
+        const portAttribue = 8080;
+        const result = await ssh.execCommand(`docker run -d -p ${portAttribue}:80 nginx`);
+        
+        if (result.code !== 0) {
+            await redisClient.set(`worker:${selectedWorkerId}:status`, 'libre');
+            await redisClient.del(`worker:${selectedWorkerId}:expires_at`);
+            return res.status(500).json({ error: "Échec du lancement de l'environnement", details: result.stderr });
+        }
 
-        res.status(200).json({ 
-            message: "Déploiement réussi !",
-            worker: workerId,
-            app_url: `http://${workerIp}:8080`,
-            docker_id: result.stdout
+        res.status(200).json({
+            message: "Environnement alloué avec succès !",
+            worker: selectedWorkerId,
+            app_url: `http://${selectedWorkerIp}:${portAttribue}`,
+            port: portAttribue,
+            expires_at: expiresAt
         });
 
-    } catch (error) {
-        console.error("Erreur de déploiement:", error);
-        res.status(500).json({ error: "Échec du déploiement" });
+    } catch (err) {
+        console.error("Erreur lors de l'allocation :", err);
+        res.status(500).json({ error: err.message });
     }
 });
 
-const PORT = 4000;
-app.listen(PORT, () => {
-    console.log(`Control Plane démarré sur le port ${PORT}`);
-});
+// 3. Tâche de fond : Surveillance des expirations (exécutée toutes les 15 secondes)
+setInterval(async () => {
+    try {
+        const keys = await redisClient.keys('worker:*');
+        const now = Date.now();
+
+        for (const key of keys) {
+            if (key.split(':').length === 2) {
+                const workerId = key.replace('worker:', '');
+                const status = await redisClient.get(`worker:${workerId}:status`);
+
+                if (status === 'loué') {
+                    const expiresAt = await redisClient.get(`worker:${workerId}:expires_at`);
+
+                    if (expiresAt && now > parseInt(expiresAt)) {
+                        console.log(`[EXPIRATION] Le temps est écoulé pour ${workerId}. Nettoyage...`);
+                        const workerIp = await redisClient.get(key);
+
+                        try {
+                            const ssh = new NodeSSH();
+                            await ssh.connect({
+                                host: workerIp,
+                                username: 'vagrant',
+                                password: 'vagrant'
+                            });
+                            await ssh.execCommand('docker rm -f $(docker ps -aq)');
+                            console.log(`[SSH] Conteneurs nettoyés sur ${workerId}.`);
+                        } catch (sshErr) {
+                            console.error(`[SSH ERREUR] Impossible de nettoyer ${workerId} :`, sshErr.message);
+                        }
+
+                        await redisClient.set(`worker:${workerId}:status`, 'libre');
+                        await redisClient.del(`worker:${workerId}:expires_at`);
+                        console.log(`[LIBÉRATION] ${workerId} est de nouveau LIBRE.`);
+                    }
+                }
+            }
+        }
+    } catch (err) {
+        console.error("Erreur dans le background task d'expiration :", err);
+    }
+}, 15000);
+
+app.listen(4000, () => console.log('Control Plane en écoute sur le port 4000'));
