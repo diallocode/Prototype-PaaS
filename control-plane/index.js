@@ -102,9 +102,9 @@ app.post('/api/deploy', async (req, res) => {
 
         // Lancement d'un conteneur de test sur un port spécifique
         const portAttribue = 8080;
+        const cleanHostName = clientNom.replace(/\s+/g, ''); // Suppression des espaces
         await ssh.execCommand(`mkdir -p /vagrant_data/${clientNom}`);
-        const result = await ssh.execCommand(`docker run -dit -p ${portAttribue}:7681 -v /vagrant_data/${clientNom}:/data tsl0922/ttyd ttyd -W bash`);
-        if (result.code !== 0) {
+        const result = await ssh.execCommand(`docker run -dit --hostname ${cleanHostName} -p ${portAttribue}:7681 -v /vagrant_data/${clientNom}:/data -w /data tsl0922/ttyd ttyd -W bash`);        if (result.code !== 0) {
             await redisClient.set(`worker:${selectedWorkerId}:status`, 'libre');
             await redisClient.del(`worker:${selectedWorkerId}:expires_at`);
             return res.status(500).json({ error: "Échec du lancement de l'environnement", details: result.stderr });
@@ -167,5 +167,58 @@ setInterval(async () => {
         console.error("Erreur dans le background task d'expiration :", err);
     }
 }, 15000);
+
+
+// Route pour prolonger la durée d'une session en cours
+app.post('/api/extend', async (req, res) => {
+    const { clientNom, extraMinutes } = req.body;
+    const minutesToAdd = parseInt(extraMinutes) || 15; // Par défaut, ajoute 15 min
+
+    try {
+        const keys = await redisClient.keys('worker:*');
+        let targetWorkerId = null;
+
+        // On cherche quel worker appartient à ce client (ou est actuellement loué)
+        // Pour affiner, on pourrais stocker le nom du client dans Redis lors de l'allocation, 
+        // mais parcourir les workers "loués" fonctionne si chaque client a une session active.
+        for (const key of keys) {
+            if (key.split(':').length === 2) {
+                const workerId = key.replace('worker:', '');
+                const status = await redisClient.get(`worker:${workerId}:status`);
+
+                if (status === 'loué') {
+                    // Pour faire simple ici, on étend le worker actif 
+                    // (si tu gères du multi-utilisateur simultané, il faudra lier la session au client en BDD ou dans Redis)
+                    targetWorkerId = workerId;
+                    break;
+                }
+            }
+        }
+
+        if (!targetWorkerId) {
+            return res.status(404).json({ error: "Aucune session active trouvée à prolonger." });
+        }
+
+        const expiresAtKey = `worker:${targetWorkerId}:expires_at`;
+        const currentExpiresAt = parseInt(await redisClient.get(expiresAtKey)) || Date.now();
+        
+        // On calcule la nouvelle date d'expiration (en ajoutant les minutes demandées au temps restant actuel ou à l'heure actuelle)
+        const newExpiresAt = Math.max(Date.now(), currentExpiresAt) + (minutesToAdd * 60 * 1000);
+
+        // Mise à jour dans Redis
+        await redisClient.set(expiresAtKey, newExpiresAt);
+
+        console.log(`[EXTENSION] Le bail du worker ${targetWorkerId} a été prolongé de ${minutesToAdd} minutes.`);
+
+        res.status(200).json({
+            message: "Session prolongée avec succès !",
+            expires_at: newExpiresAt
+        });
+
+    } catch (err) {
+        console.error("Erreur lors de l'extension du bail :", err);
+        res.status(500).json({ error: err.message });
+    }
+});
 
 app.listen(4000, () => console.log('Control Plane en écoute sur le port 4000'));

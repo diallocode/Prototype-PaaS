@@ -22,34 +22,15 @@ const pool = new Pool({
 app.post('/clients', async (req, res) => {
   const { nom, prenom, md, temps } = req.body;
   try {
-    // Sauvegarde du client dans la BDD PostgreSQL
     const result = await pool.query(
       'INSERT INTO Clients (Nom, Prenom, md, temps) VALUES ($1, $2, $3, $4) RETURNING *',
       [nom, prenom, md, temps]
     );
     const nouveauClient = result.rows[0];
 
-    // Demande de déploiement au Control Plane
-    // On lui envoie la durée et le nom du client !
-    const responseCP = await fetch('http://localhost:4000/api/deploy', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-            duree: temps,
-            clientNom: nom
-        })
-    });
-
-    const deployInfo = await responseCP.json();
-
-    if (!responseCP.ok) {
-        throw new Error(deployInfo.error || "Erreur lors du déploiement");
-    }
-
-    // On renvoie les infos du client ET le lien de la VM à l'interface web
+    // On renvoie uniquement le client créé
     res.json({
-        client: nouveauClient,
-        deploiement: deployInfo
+        client: nouveauClient
     });
 
   } catch (err) {
@@ -94,6 +75,29 @@ app.post('/reserver', async (req, res) => {
       res.json({ message: "Machine allouée avec succès !", workerInfo: data });
     } else {
       res.status(503).json({ error: data.error || "Le Control Plane n'a pas pu allouer de machine" });
+    }
+  } catch (err) {
+    res.status(500).json({ error: "Erreur de communication avec le Control Plane : " + err.message });
+  }
+});
+
+// Demande de prolongation de session
+app.post('/prolonger', async (req, res) => {
+  const { clientNom, extraMinutes } = req.body;
+  
+  try {
+    const response = await fetch('http://control-plane:4000/api/extend', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ clientNom, extraMinutes })
+    });
+
+    const data = await response.json();
+    
+    if (response.ok) {
+      res.json({ message: "Session prolongée !", data });
+    } else {
+      res.status(500).json({ error: data.error || "Impossible de prolonger la session" });
     }
   } catch (err) {
     res.status(500).json({ error: "Erreur de communication avec le Control Plane : " + err.message });

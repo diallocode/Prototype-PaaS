@@ -62,12 +62,19 @@ const doSignup = () => run(async () => {
   const data = await post('/clients', { ...signup })
   user.value = data.client
   save('paas_user', user.value)
-  setSession(data.deploiement)
 })
 
 const reserve = () => run(async () => {
   const data = await post('/reserver', { duree: duree.value, clientNom: user.value.nom })
   setSession(data.workerInfo)
+})
+
+const extendSession = (minutes) => run(async () => {
+  const data = await post('/prolonger', { clientNom: user.value.nom, extraMinutes: minutes })
+  if (session.value) {
+    session.value.expires_at = data.data.expires_at
+    save('paas_session', session.value)
+  }
 })
 
 function logout() {
@@ -213,6 +220,7 @@ async function copyUrl() {
           </div>
           <div class="actions">
             <a class="btn" :href="session.app_url" target="_blank" rel="noopener">Ouvrir le terminal</a>
+            <button class="ghost" @click="extendSession(15)">+ 15 min</button>
             <button class="ghost" @click="embed = !embed">{{ embed ? 'Masquer l\'aperçu' : 'Afficher ici' }}</button>
           </div>
         </template>
