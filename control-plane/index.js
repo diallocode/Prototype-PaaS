@@ -31,7 +31,7 @@ async function getWorkerSpecs(ssh) {
     }
 }
 
-// 1. Route d'enregistrement (Heartbeat) des Workers
+// Route d'enregistrement (Heartbeat) des Workers
 app.post('/api/heartbeat', async (req, res) => {
     const { workerId, ip } = req.body;
     if (!workerId || !ip) {
@@ -53,7 +53,7 @@ app.post('/api/heartbeat', async (req, res) => {
     res.status(200).json({ message: "Heartbeat reçu" });
 });
 
-// 2. Route de déploiement / allocation d'un Worker libre
+// Route de déploiement / allocation d'un Worker libre
 app.post('/api/deploy', async (req, res) => {
     try {
         const dureeMinutes = parseInt(req.body.duree) || 10;
@@ -125,7 +125,7 @@ app.post('/api/deploy', async (req, res) => {
     }
 });
 
-// 3. Tâche de fond : Surveillance des expirations (exécutée toutes les 15 secondes)
+// Tâche de fond : Surveillance des expirations (exécutée toutes les 15 secondes)
 setInterval(async () => {
     try {
         const keys = await redisClient.keys('worker:*');
