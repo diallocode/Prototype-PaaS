@@ -21,9 +21,27 @@ const durees = [10, 30, 60, 120]
 const login = reactive({ nom: '', md: '' })
 const signup = reactive({ nom: '', prenom: '', md: '', temps: 30 })
 
-let timer
-onMounted(() => { timer = setInterval(() => (now.value = Date.now()), 1000) })
-onUnmounted(() => clearInterval(timer))
+let timer, poll
+onMounted(() => {
+  timer = setInterval(() => (now.value = Date.now()), 1000)
+  poll = setInterval(refreshSession, 5000)   // suit les bascules de worker
+})
+onUnmounted(() => { clearInterval(timer); clearInterval(poll) })
+
+async function refreshSession() {
+  if (!user.value || !session.value) return
+  try {
+    const res = await fetch(`${API}/session/${encodeURIComponent(user.value.nom)}`)
+    if (!res.ok) return
+    const s = await res.json()
+    if (s.state !== 'active') return            // "pending" : on garde l'affichage actuel
+    if (s.worker !== session.value.worker) {    // bascule détectée
+      session.value = { ...session.value, worker: s.worker, app_url: s.app_url,
+                        specs: s.specs || session.value.specs, expires_at: s.expires_at }
+      save('paas_session', session.value)
+    }
+  } catch {}
+}
 
 async function post(path, body) {
   const res = await fetch(API + path, {

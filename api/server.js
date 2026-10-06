@@ -60,7 +60,7 @@ app.post('/login', async (req, res) => {
 app.post('/reserver', async (req, res) => {
   // On récupère la durée ET le nom du client envoyé par le front-end
   const { duree, clientNom } = req.body;
-  
+
   try {
     const response = await fetch('http://control-plane:4000/api/deploy', {
       method: 'POST',
@@ -70,7 +70,7 @@ app.post('/reserver', async (req, res) => {
     });
 
     const data = await response.json();
-    
+
     if (response.ok) {
       res.json({ message: "Machine allouée avec succès !", workerInfo: data });
     } else {
@@ -84,7 +84,7 @@ app.post('/reserver', async (req, res) => {
 // Demande de prolongation de session
 app.post('/prolonger', async (req, res) => {
   const { clientNom, extraMinutes } = req.body;
-  
+
   try {
     const response = await fetch('http://control-plane:4000/api/extend', {
       method: 'POST',
@@ -93,7 +93,7 @@ app.post('/prolonger', async (req, res) => {
     });
 
     const data = await response.json();
-    
+
     if (response.ok) {
       res.json({ message: "Session prolongée !", data });
     } else {
@@ -101,6 +101,16 @@ app.post('/prolonger', async (req, res) => {
     }
   } catch (err) {
     res.status(500).json({ error: "Erreur de communication avec le Control Plane : " + err.message });
+  }
+});
+
+// NOUVEAU : état actuel de la session d'un client (l'URL change après une bascule)
+app.get('/session/:clientNom', async (req, res) => {
+  try {
+    const r = await fetch(`http://control-plane:4000/api/session/${encodeURIComponent(req.params.clientNom)}`);
+    res.status(r.status).json(await r.json());
+  } catch (err) {
+    res.status(500).json({ error: 'Erreur de communication avec le Control Plane' });
   }
 });
 

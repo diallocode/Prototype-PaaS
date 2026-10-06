@@ -5,20 +5,36 @@ const { NodeSSH } = require('node-ssh');
 const app = express();
 app.use(express.json());
 
-// Connexion au serveur Redis (sur le réseau Docker)
-const redisClient = createClient({
-    url: 'redis://redis:6379'
-});
-
+const redisClient = createClient({ url: process.env.REDIS_URL || 'redis://redis:6379' });
 redisClient.on('error', (err) => console.error('Erreur Redis :', err));
 
-async function start() {
-    await redisClient.connect();
-    console.log("Connecté à Redis (Control Plane)");
-}
-start();
+const ALIVE_TTL = 20;          // un worker est "mort" s'il n'a pas envoyé de heartbeat depuis 20 s
+const APP_PORT = 8080;         // port exposé sur le worker
+const NAME_RE = /^[A-Za-z0-9_-]{1,32}$/;
 
-// Récupère l'OS, les vCPU, la RAM (Mo) et le disque (Go) d'un worker via SSH
+// ---------- Utilitaires ----------
+
+// Nettoie et valide le nom client (empêche l'injection de commande et le path traversal)
+function cleanName(raw) {
+    const n = String(raw || '').replace(/\s+/g, '');
+    return NAME_RE.test(n) ? n : null;
+}
+
+async function sshTo(ip) {
+    const ssh = new NodeSSH();
+    await ssh.connect({ host: ip, username: 'vagrant', password: 'vagrant', readyTimeout: 8000 });
+    return ssh;
+}
+
+async function listWorkers() {
+    const keys = await redisClient.keys('worker:*');
+    return keys.filter(k => k.split(':').length === 2).map(k => k.slice('worker:'.length));
+}
+
+async function isAlive(workerId) {
+    return (await redisClient.exists(`worker:${workerId}:alive`)) === 1;
+}
+
 async function getWorkerSpecs(ssh) {
     try {
         const cmd = '. /etc/os-release && echo "$PRETTY_NAME"; nproc; free -m | awk \'/Mem:/ {print $2}\'; df -BG --output=size / | tail -1 | tr -dc 0-9';
@@ -31,194 +47,210 @@ async function getWorkerSpecs(ssh) {
     }
 }
 
-// Route d'enregistrement (Heartbeat) des Workers
+async function releaseWorker(workerId, status = 'libre') {
+    await redisClient.set(`worker:${workerId}:status`, status);
+    await redisClient.del(`worker:${workerId}:expires_at`);
+    await redisClient.del(`worker:${workerId}:claim`);
+}
+
+// ---------- Sessions (client -> worker) ----------
+
+async function getSession(name) {
+    const raw = await redisClient.get(`session:${name}`);
+    return raw ? JSON.parse(raw) : null;
+}
+async function saveSession(s) {
+    await redisClient.set(`session:${s.clientNom}`, JSON.stringify(s));
+}
+
+/**
+ * Trouve un worker libre ET vivant, lance le conteneur du client dessus.
+ * Les données sont dans /vagrant_data/<client> (dossier synchronisé de l'hôte),
+ * donc elles sont retrouvées telles quelles sur n'importe quel worker.
+ */
+async function allocate(name, expiresAt) {
+    for (const workerId of await listWorkers()) {
+        if ((await redisClient.get(`worker:${workerId}:status`)) !== 'libre') continue;
+        if (!(await isAlive(workerId))) continue;
+
+        // Réservation atomique : évite que 2 clients prennent le même worker
+        const claimed = await redisClient.set(`worker:${workerId}:claim`, name, { NX: true });
+        if (!claimed) continue;
+
+        const ip = await redisClient.get(`worker:${workerId}`);
+        try {
+            const ssh = await sshTo(ip);
+            await ssh.execCommand(`mkdir -p /vagrant_data/${name}`);
+            const r = await ssh.execCommand(
+                `docker rm -f session-${name} 2>/dev/null; ` +
+                `docker run -dit --name session-${name} --hostname ${name} ` +
+                `-p ${APP_PORT}:7681 -v /vagrant_data/${name}:/data -w /data tsl0922/ttyd ttyd -W bash`
+            );
+            if (r.code !== 0) throw new Error(r.stderr);
+
+            const specs = await getWorkerSpecs(ssh);
+            ssh.dispose();
+
+            await redisClient.set(`worker:${workerId}:status`, 'loué');
+            await redisClient.set(`worker:${workerId}:expires_at`, expiresAt);
+
+            const session = {
+                clientNom: name, worker: workerId, ip, port: APP_PORT,
+                app_url: `http://${ip}:${APP_PORT}`,
+                specs, expires_at: expiresAt, state: 'active'
+            };
+            await saveSession(session);
+            return session;
+        } catch (e) {
+            console.error(`[ALLOCATION] Échec sur ${workerId} :`, e.message);
+            await redisClient.del(`worker:${workerId}:claim`);   // on essaie le worker suivant
+        }
+    }
+    return null;
+}
+
+// ---------- Routes ----------
+
 app.post('/api/heartbeat', async (req, res) => {
     const { workerId, ip } = req.body;
-    if (!workerId || !ip) {
-        return res.status(400).json({ error: "workerId et ip requis" });
+    if (!workerId || !ip) return res.status(400).json({ error: 'workerId et ip requis' });
+
+    await redisClient.set(`worker:${workerId}`, ip);
+    await redisClient.set(`worker:${workerId}:alive`, '1', { EX: ALIVE_TTL });   // preuve de vie
+
+    if (!(await redisClient.get(`worker:${workerId}:status`))) {
+        await redisClient.set(`worker:${workerId}:status`, 'libre');
     }
-
-    const workerKey = `worker:${workerId}`;
-    const statusKey = `worker:${workerId}:status`;
-
-    // Enregistre l'IP du worker
-    await redisClient.set(workerKey, ip);
-
-    // Si le worker n'a pas encore de statut, on l'initialise à "libre"
-    const currentStatus = await redisClient.get(statusKey);
-    if (!currentStatus) {
-        await redisClient.set(statusKey, 'libre');
-    }
-
-    res.status(200).json({ message: "Heartbeat reçu" });
+    res.status(200).json({ message: 'Heartbeat reçu' });
 });
 
-// Route de déploiement / allocation d'un Worker libre
 app.post('/api/deploy', async (req, res) => {
     try {
-        const dureeMinutes = parseInt(req.body.duree) || 10;
-        
-        // Récupérer toutes les clés des workers enregistrés
-        const keys = await redisClient.keys('worker:*');
-        let selectedWorkerId = null;
-        let selectedWorkerIp = null;
-        const clientNom = req.body.clientNom || 'client_defaut';
-        console.log(`[DEBUG] Nom du dossier client utilisé : ${clientNom}`);
+        const name = cleanName(req.body.clientNom || 'client_defaut');
+        if (!name) return res.status(400).json({ error: 'clientNom invalide (lettres, chiffres, - et _ uniquement)' });
 
-        // Chercher un worker qui a le statut "libre"
-        for (const key of keys) {
-            if (key.split(':').length === 2) {
-                const workerId = key.replace('worker:', '');
-                const status = await redisClient.get(`worker:${workerId}:status`);
+        const duree = Math.min(Math.max(parseInt(req.body.duree) || 10, 1), 240);
 
-                if (status === 'libre') {
-                    selectedWorkerId = workerId;
-                    selectedWorkerIp = await redisClient.get(key);
-                    break;
-                }
-            }
+        // Le client a déjà une session : on la renvoie au lieu d'en louer une deuxième
+        const existing = await getSession(name);
+        if (existing && existing.state === 'active') {
+            return res.status(200).json({ message: 'Session déjà active', worker: existing.worker, ...existing });
+        }
+        if (existing && existing.state === 'pending') {
+            return res.status(202).json({ message: 'Session en cours de migration', ...existing });
         }
 
-        if (!selectedWorkerId || !selectedWorkerIp) {
-            return res.status(503).json({ error: "Aucun worker disponible. Tous sont occupés." });
-        }
+        const session = await allocate(name, Date.now() + duree * 60 * 1000);
+        if (!session) return res.status(503).json({ error: 'Aucun worker disponible. Tous sont occupés.' });
 
-        console.log(`[ALLOCATION] Attribution de ${selectedWorkerId} (${selectedWorkerIp}) pour ${dureeMinutes} minutes.`);
-
-        // Verrouillage immédiat dans Redis
-        const expiresAt = Date.now() + (dureeMinutes * 60 * 1000);
-        await redisClient.set(`worker:${selectedWorkerId}:status`, 'loué');
-        await redisClient.set(`worker:${selectedWorkerId}:expires_at`, expiresAt);
-
-        // Connexion SSH au Worker avec le mot de passe 'vagrant'
-        const ssh = new NodeSSH();
-        await ssh.connect({
-            host: selectedWorkerIp,
-            username: 'vagrant',
-            password: 'vagrant'
-        });
-
-        const specs = await getWorkerSpecs(ssh);
-
-        // Lancement d'un conteneur de test sur un port spécifique
-        const portAttribue = 8080;
-        const cleanHostName = clientNom.replace(/\s+/g, ''); // Suppression des espaces
-        await ssh.execCommand(`mkdir -p /vagrant_data/${clientNom}`);
-        const result = await ssh.execCommand(`docker run -dit --hostname ${cleanHostName} -p ${portAttribue}:7681 -v /vagrant_data/${clientNom}:/data -w /data tsl0922/ttyd ttyd -W bash`);        if (result.code !== 0) {
-            await redisClient.set(`worker:${selectedWorkerId}:status`, 'libre');
-            await redisClient.del(`worker:${selectedWorkerId}:expires_at`);
-            return res.status(500).json({ error: "Échec du lancement de l'environnement", details: result.stderr });
-        }
-
-        res.status(200).json({
-            message: "Environnement alloué avec succès !",
-            worker: selectedWorkerId,
-            app_url: `http://${selectedWorkerIp}:${portAttribue}`,
-            port: portAttribue,
-            specs,
-            expires_at: expiresAt
-        });
-
+        console.log(`[ALLOCATION] ${session.worker} -> ${name} pour ${duree} min`);
+        res.status(200).json({ message: 'Environnement alloué avec succès !', ...session });
     } catch (err) {
         console.error("Erreur lors de l'allocation :", err);
-        res.status(500).json({ error: err.message });
+        res.status(500).json({ error: 'Erreur interne' });
     }
 });
 
-// Tâche de fond : Surveillance des expirations (exécutée toutes les 15 secondes)
-setInterval(async () => {
+// Le front interroge cette route pour connaître l'URL actuelle (elle change après une bascule)
+app.get('/api/session/:clientNom', async (req, res) => {
+    const name = cleanName(req.params.clientNom);
+    const s = name && await getSession(name);
+    if (!s) return res.status(404).json({ error: 'Aucune session' });
+    res.json(s);
+});
+
+app.post('/api/extend', async (req, res) => {
     try {
-        const keys = await redisClient.keys('worker:*');
+        const name = cleanName(req.body.clientNom);
+        if (!name) return res.status(400).json({ error: 'clientNom invalide' });
+        const minutes = Math.min(Math.max(parseInt(req.body.extraMinutes) || 15, 1), 120);
+
+        const s = await getSession(name);
+        if (!s) return res.status(404).json({ error: 'Aucune session active trouvée à prolonger.' });
+
+        s.expires_at = Math.max(Date.now(), s.expires_at) + minutes * 60 * 1000;
+        await saveSession(s);
+        if (s.state === 'active') await redisClient.set(`worker:${s.worker}:expires_at`, s.expires_at);
+
+        console.log(`[EXTENSION] ${name} prolongé de ${minutes} min`);
+        res.status(200).json({ message: 'Session prolongée avec succès !', expires_at: s.expires_at });
+    } catch (err) {
+        console.error("Erreur lors de l'extension :", err);
+        res.status(500).json({ error: 'Erreur interne' });
+    }
+});
+
+// ---------- Surveillance : expiration + FAILOVER (toutes les 5 s) ----------
+
+let monitoring = false;
+async function monitor() {
+    if (monitoring) return;
+    monitoring = true;
+    try {
         const now = Date.now();
 
-        for (const key of keys) {
-            if (key.split(':').length === 2) {
-                const workerId = key.replace('worker:', '');
-                const status = await redisClient.get(`worker:${workerId}:status`);
+        // 1) Sessions : expiration, panne, migration en attente
+        for (const key of await redisClient.keys('session:*')) {
+            const s = JSON.parse(await redisClient.get(key));
+            if (!s) continue;
 
-                if (status === 'loué') {
-                    const expiresAt = await redisClient.get(`worker:${workerId}:expires_at`);
-
-                    if (expiresAt && now > parseInt(expiresAt)) {
-                        console.log(`[EXPIRATION] Le temps est écoulé pour ${workerId}. Nettoyage...`);
-                        const workerIp = await redisClient.get(key);
-
-                        try {
-                            const ssh = new NodeSSH();
-                            await ssh.connect({
-                                host: workerIp,
-                                username: 'vagrant',
-                                password: 'vagrant'
-                            });
-                            await ssh.execCommand('docker rm -f $(docker ps -aq)');
-                            console.log(`[SSH] Conteneurs nettoyés sur ${workerId}.`);
-                        } catch (sshErr) {
-                            console.error(`[SSH ERREUR] Impossible de nettoyer ${workerId} :`, sshErr.message);
-                        }
-
-                        await redisClient.set(`worker:${workerId}:status`, 'libre');
-                        await redisClient.del(`worker:${workerId}:expires_at`);
-                        console.log(`[LIBÉRATION] ${workerId} est de nouveau LIBRE.`);
-                    }
+            if (now > s.expires_at) {
+                console.log(`[EXPIRATION] ${s.clientNom} sur ${s.worker}`);
+                if (s.state === 'active' && (await isAlive(s.worker))) {
+                    try {
+                        const ssh = await sshTo(s.ip);
+                        await ssh.execCommand(`docker rm -f session-${s.clientNom}`);
+                        ssh.dispose();
+                    } catch (e) { console.error('[SSH] Nettoyage impossible :', e.message); }
                 }
+                if (s.state === 'active') {
+                    const st = (await isAlive(s.worker)) ? 'libre' : 'down';
+                    await releaseWorker(s.worker, st);
+                }
+                await redisClient.del(key);
+                continue;
             }
-        }
-    } catch (err) {
-        console.error("Erreur dans le background task d'expiration :", err);
-    }
-}, 15000);
 
-
-// Route pour prolonger la durée d'une session en cours
-app.post('/api/extend', async (req, res) => {
-    const { clientNom, extraMinutes } = req.body;
-    const minutesToAdd = parseInt(extraMinutes) || 15; // Par défaut, ajoute 15 min
-
-    try {
-        const keys = await redisClient.keys('worker:*');
-        let targetWorkerId = null;
-
-        // On cherche quel worker appartient à ce client (ou est actuellement loué)
-        // Pour affiner, on pourrais stocker le nom du client dans Redis lors de l'allocation, 
-        // mais parcourir les workers "loués" fonctionne si chaque client a une session active.
-        for (const key of keys) {
-            if (key.split(':').length === 2) {
-                const workerId = key.replace('worker:', '');
-                const status = await redisClient.get(`worker:${workerId}:status`);
-
-                if (status === 'loué') {
-                    // Pour faire simple ici, on étend le worker actif 
-                    // (si tu gères du multi-utilisateur simultané, il faudra lier la session au client en BDD ou dans Redis)
-                    targetWorkerId = workerId;
-                    break;
+            const workerDown = s.state === 'active' && !(await isAlive(s.worker));
+            if (workerDown || s.state === 'pending') {
+                if (workerDown) {
+                    console.warn(`[FAILOVER] ${s.worker} ne répond plus, migration de ${s.clientNom}...`);
+                    await releaseWorker(s.worker, 'down');
+                }
+                // Les fichiers sont dans /vagrant_data/<client> : rien n'est perdu.
+                // Le temps restant est conservé (expires_at inchangé).
+                const moved = await allocate(s.clientNom, s.expires_at);
+                if (moved) {
+                    console.log(`[FAILOVER] ${s.clientNom} : ${s.worker} -> ${moved.worker}`);
+                } else {
+                    s.state = 'pending';       // aucun worker libre : on réessaiera au prochain tour
+                    await saveSession(s);
                 }
             }
         }
 
-        if (!targetWorkerId) {
-            return res.status(404).json({ error: "Aucune session active trouvée à prolonger." });
+        // 2) Workers marqués "down" qui reviennent : on nettoie puis on les remet en service
+        for (const workerId of await listWorkers()) {
+            if ((await redisClient.get(`worker:${workerId}:status`)) === 'down' && (await isAlive(workerId))) {
+                try {
+                    const ssh = await sshTo(await redisClient.get(`worker:${workerId}`));
+                    await ssh.execCommand('docker ps -aq | xargs -r docker rm -f');
+                    ssh.dispose();
+                    await releaseWorker(workerId, 'libre');
+                    console.log(`[RETOUR] ${workerId} est de nouveau LIBRE.`);
+                } catch (e) { console.error(`[RETOUR] ${workerId} pas encore prêt :`, e.message); }
+            }
         }
-
-        const expiresAtKey = `worker:${targetWorkerId}:expires_at`;
-        const currentExpiresAt = parseInt(await redisClient.get(expiresAtKey)) || Date.now();
-        
-        // On calcule la nouvelle date d'expiration (en ajoutant les minutes demandées au temps restant actuel ou à l'heure actuelle)
-        const newExpiresAt = Math.max(Date.now(), currentExpiresAt) + (minutesToAdd * 60 * 1000);
-
-        // Mise à jour dans Redis
-        await redisClient.set(expiresAtKey, newExpiresAt);
-
-        console.log(`[EXTENSION] Le bail du worker ${targetWorkerId} a été prolongé de ${minutesToAdd} minutes.`);
-
-        res.status(200).json({
-            message: "Session prolongée avec succès !",
-            expires_at: newExpiresAt
-        });
-
     } catch (err) {
-        console.error("Erreur lors de l'extension du bail :", err);
-        res.status(500).json({ error: err.message });
+        console.error('Erreur dans la tâche de surveillance :', err);
+    } finally {
+        monitoring = false;
     }
-});
+}
 
-app.listen(4000, () => console.log('Control Plane en écoute sur le port 4000'));
+(async () => {
+    await redisClient.connect();
+    console.log('Connecté à Redis (Control Plane)');
+    setInterval(monitor, 5000);
+    app.listen(4000, () => console.log('Control Plane en écoute sur le port 4000'));
+})();
