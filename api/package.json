@@ -3,10 +3,17 @@
   "version": "1.0.0",
   "main": "server.js",
   "scripts": {
-    "start": "node --watch server.js"
+    "start": "node --watch server.js",
+    "test": "node --test",
+    "test:api": "node --test tests/api_routes.test.js",
+    "test:integration": "node --test tests/integration.test.js"
   },
   "dependencies": {
+    "bcrypt": "^6.0.0",
     "express": "^4.18.2",
     "pg": "^8.11.3"
+  },
+  "devDependencies": {
+    "supertest": "^7.3.1"
   }
 }

@@ -1,5 +1,9 @@
 const express = require('express');
 const { Pool } = require('pg');
+
+const bcrypt = require('bcrypt');
+const saltRounds = 10;
+
 const app = express();
 app.use(express.json());
 
@@ -18,41 +22,59 @@ const pool = new Pool({
   port: 5432,
 });
 
-// Inscription d'un client
+// Inscription d'un client avec hachage du mot de passe
 app.post('/clients', async (req, res) => {
   const { nom, prenom, md, temps } = req.body;
   try {
+    // 1. Hacher le mot de passe (md) avant stockage
+    const hashedPassword = await bcrypt.hash(md, saltRounds);
+
     const result = await pool.query(
       'INSERT INTO Clients (Nom, Prenom, md, temps) VALUES ($1, $2, $3, $4) RETURNING *',
-      [nom, prenom, md, temps]
+      [nom, prenom, hashedPassword, temps]
     );
     const nouveauClient = result.rows[0];
 
-    // On renvoie uniquement le client créé
+    // Ne jamais renvoyer le mot de passe (même haché) dans la réponse
+    delete nouveauClient.md;
+
     res.json({
         client: nouveauClient
     });
 
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: "Erreur lors de l'inscription" });
   }
 });
 
-// Connexion d'un client
+// Connexion d'un client avec vérification du hash bcrypt
 app.post('/login', async (req, res) => {
   const { nom, md } = req.body;
   try {
+    // 1. Récupérer l'utilisateur par son nom
     const result = await pool.query(
-      'SELECT * FROM Clients WHERE Nom = $1 AND md = $2',
-      [nom, md]
+      'SELECT * FROM Clients WHERE Nom = $1',
+      [nom]
     );
-    if (result.rows.length > 0) {
-      res.json({ success: true, client: result.rows[0] });
+
+    if (result.rows.length === 0) {
+      return res.status(401).json({ success: false, message: "Nom d'utilisateur ou mot de passe incorrect" });
+    }
+
+    const client = result.rows[0];
+
+    // 2. Comparer le mot de passe fourni avec le hash stocké en base
+    const match = await bcrypt.compare(md, client.md);
+
+    if (match) {
+      // Ne pas renvoyer le mot de passe dans l'objet client retourné
+      delete client.md;
+      res.json({ success: true, client });
     } else {
       res.status(401).json({ success: false, message: "Nom d'utilisateur ou mot de passe incorrect" });
     }
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: "Erreur lors de la connexion" });
   }
 });
 
