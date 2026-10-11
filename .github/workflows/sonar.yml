@@ -13,11 +13,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Run Trivy scanner and display table
+      - name: Build Docker image
+        run: docker build -t my-app:latest ./api
+
+      - name: Run Trivy scanner on Docker image
         uses: aquasecurity/trivy-action@master
         with:
-          scan-type: 'fs'
-          scan-ref: '.'
+          image-ref: 'my-app:latest'
           format: 'table'
           exit-code: '0'
           severity: 'CRITICAL,HIGH'
