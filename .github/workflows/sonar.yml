@@ -20,12 +20,11 @@ jobs:
         with:
           node-version: '20'
 
-      # Exemple pour l'API (installer les dépendances et lancer les tests avec rapport)
+      # Exemple pour l'API (installer les dépendances et lancer les tests)
       - name: Install dependencies & Test API
         run: |
           cd api
           npm install
-          # Commande pour générer un rapport de couverture si configuré (ex: c8 ou jest/vitest)
           # npm test -- --coverage
 
       - name: SonarCloud Scan
@@ -40,5 +39,5 @@ jobs:
           scan-type: 'fs'
           scan-ref: '.'
           format: 'table'
-          exit-code: '0' # '1' si on veux bloquer le build en cas de faille critique
+          exit-code: '0' # '1' si tu veux bloquer le build en cas de faille critique
           severity: 'CRITICAL,HIGH'
